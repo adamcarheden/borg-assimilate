@@ -1,0 +1,30 @@
+[
+	{
+		"repo": "/mnt/borg_repo",
+		"include": [
+			"/",
+		],
+		"exclude": [
+			"/dev/**",
+			"/lib/**",
+			"/lib64/**",
+			"/media/**",
+			"/mnt/**",
+			"/proc/**",
+			"/run/**",
+			"/sys/**",
+			"/tmp/**",
+			"/usr/tmp/**",
+			"/var/tmp/**"
+		],
+		"extra_args": ["--compression=lz4"],
+		"prune": {
+			"within": "2d",
+			"hourly": 168,
+			"daily": 7,
+			"weekly": 5,
+			"monthly": 12,
+			"yearly": 10
+		}
+	}
+]

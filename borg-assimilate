@@ -1,0 +1,167 @@
+#!/usr/bin/perl -w
+#
+# Runs one or more borg backups (https://borgbackup.readthedocs.io) based on a config file
+# Logs using `logger` and prints stuff only if things fail.
+# That's useful for dumping stuff in cron with a MAILTO= line for quick loggin and 
+# failure monitoring.
+#
+
+use strict;
+use warnings;
+use JSON;
+use File::Slurp;
+use Getopt::Long;
+use File::Basename;
+use DateTime;
+
+my $self = basename($0);
+
+my ($dry_run, $help, $verbose);
+my $dry_run_warn = '';
+sub logmsg {
+	my @cmd = ('logger', "${self}: ");
+	push(@cmd, @_);
+	print join(" ",@_)."\n\n" if ($verbose);
+	print STDERR "${dry_run_warn}Failed to send log message [".join(' ',@_)."]\n" if (system(@cmd) != 0);
+}
+sub logerr {
+	my @msg = ("ERROR: ");
+	push(@msg,@_);
+	my $msg = join(" ",@msg)."\n";
+	print STDERR $msg;
+	logmsg(@msg);
+	return $msg;
+}
+sub mydie {
+	my $msg = logerr(@_);
+	die($msg);
+}
+
+sub usage {
+	my ($msg) = @_;
+	my $exit = 0;
+	if ($msg) {
+		$exit = 1;
+		chomp $msg;
+		print "$msg\n";
+	}
+	print <<EOF;
+Usage: $0 [options] [config file]
+	-v|--verbose - Print all log messages to stdout
+	-n|--dry-run - Add --dry-run arg to all borg commands
+EOF
+	exit $exit;
+}
+
+sub humanTimeDelta($$) {
+	my ($start,$end) = @_;
+	my $start_dt = DateTime->from_epoch(epoch => $start);
+	my $end_dt = DateTime->from_epoch(epoch => $end);
+	my $diff = $end_dt->subtract_datetime($start_dt);
+	my @human = ();
+	push(@human, $diff->months . "mo") if ($diff->months);
+	push(@human, $diff->days . "d") if ($diff->days);
+	push(@human, $diff->hours . "h") if ($diff->hours);
+	push(@human, $diff->minutes . "m") if ($diff->minutes);
+	push(@human, $diff->seconds . "s") if ($diff->seconds);
+	return join(" ",@human);
+}
+
+GetOptions(
+	"n|dry-run" => \$dry_run,
+	"h|help" => \$help,
+	"v|verbose" => \$verbose,
+) or mydie "Failed to parse args";
+usage if $help;
+$dry_run_warn = "(DRY RUN) " if ($dry_run);
+
+my $cfg_file = dirname($0)."/../etc/".basename($0).".json";
+$cfg_file = $ARGV[0] if ($#ARGV >= 0);
+$cfg_file = `readlink -e '$cfg_file'`;
+chomp $cfg_file;
+usage "'$cfg_file': No such file" unless (-f $cfg_file);
+usage "'$cfg_file': Can't read file" unless (-f $cfg_file);
+
+sub addArgs($$) {
+	my ($cmd, $args) = @_;
+	foreach my $arg (@$args) {
+		push(@$cmd,$arg);
+	}
+}
+sub runcmd($$) {
+	my ($cmd,$backup_id) = @_;
+	my $cmd_str = "'".join("' '",@$cmd)."'";
+	my $start = time;
+	logmsg "${dry_run_warn}Starting $backup_id [".$cmd_str."]";
+	if (my $ret = system(@${cmd}) != 0) {
+		$ret = $ret * 127;
+		logerr "[$cmd_str] failed with exit status: $ret"; 
+		return 0;
+	}
+	my $end = time;
+	logmsg "${dry_run_warn}Completed $backup_id [".$cmd_str."] in ".humanTimeDelta($start,$end);
+	return 1;
+}
+
+my $json = read_file($cfg_file) || mydie "Failed to read '$cfg_file'";
+my $cfg = from_json($json) || mydie "Failed to parse JSON from '$cfg_file'";
+
+$cfg = [$cfg] unless (ref($cfg) eq 'ARRAY');
+
+my $i = 0;
+my $date = `date -uIs`;
+mydie "Failed to get date" unless ($? == 0);
+chomp $date;
+my $exit = 0;
+foreach my $backup (@{$cfg}) {
+	$i++;
+	my $backup_id = "Backup '$i' from '$cfg_file'";
+	if (!defined($backup->{repo})) {
+		logerr "$backup_id has no repo.";
+		next;
+	}
+	if(!defined($backup->{include})) {
+		logerr "$backup_id has no include";
+		next;
+	}
+	if(!-d $backup->{repo}) {
+		logerr "'$backup->{repo}': No such directory";
+		next;
+	}
+	my $cmd = ['borg', 'create'];
+	push(@$cmd, '--dry-run') if ($dry_run);
+	addArgs($cmd,$backup->{extra_args}) if (defined($backup->{extra_args}));
+	if (defined($backup->{exclude})) {
+		$backup->{exclude} = [$backup->{exclude}] unless (ref($backup->{exclude}) eq 'ARRAY');
+		foreach my $exc (@{$backup->{exclude}}) {
+			push(@$cmd,"--exclude=$exc");
+		}
+	}
+	my $archive=$date;
+	$archive = $backup->{prefix}.$archive if (defined($backup->{prefix}));
+	push(@$cmd,${backup}->{repo}."::".${archive});
+	$backup->{include} = [$backup->{include}] unless (ref($backup->{include}) eq 'ARRAY');
+	foreach my $exc (@{$backup->{include}}) {
+		push(@$cmd,"$exc");
+	}
+	if (!runcmd($cmd,$backup_id)) {
+		$exit++;
+		next;
+	}
+	if (defined($backup->{prune})) {
+		$cmd = ['borg', 'prune'];
+		push(@$cmd, '--dry-run') if ($dry_run);
+		push(@$cmd, "--prefix=".$backup->{prefix}) if (defined($backup->{prefix}));
+		foreach my $k (qw(within hourly daily weekly monthly yearly)) {
+			push(@$cmd, "--keep-${k}=".$backup->{prune}->{$k}) if (defined($backup->{prune}->{$k}));
+		}
+		addArgs($cmd,$backup->{prune}->{extra_args}) if (defined($backup->{prune}->{extra_args}));
+		push(@$cmd,$backup->{repo});
+		if (!runcmd($cmd,"Prune of ".$backup_id)) {
+			$exit++;
+			next;
+		}
+	}
+}
+
+exit $exit;
