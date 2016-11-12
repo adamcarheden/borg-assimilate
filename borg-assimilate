@@ -144,6 +144,8 @@ foreach my $backup (@{$cfg}) {
 	foreach my $exc (@{$backup->{include}}) {
 		push(@$cmd,"$exc");
 	}
+	$ENV{'BORG_PASSPHRASE'} = $backup->{passphrase} if (defined($backup->{passphrase}));
+	$ENV{'BORG_KEYS_DIR'} = $backup->{keysdir} if (defined($backup->{keysdir}));
 	if (!runcmd($cmd,$backup_id)) {
 		$exit++;
 		next;
